@@ -952,7 +952,6 @@ def _get_create_kwargs(
     # The "kwargs" dict at this point will only contain unused args
     return create_kwargs, kwargs
 
-
 def compare_containers(first, second, ignore=None):
     """
     Compare two containers' configurations and return a dictionary of differences
@@ -973,6 +972,50 @@ def compare_containers(first, second, ignore=None):
     # Get container configurations
     result1 = inspect_container(first)
     result2 = inspect_container(second)
+
+    # Helper function to normalize bind mount strings for comparison
+    def normalize_bind(bind_str):
+        """
+        Normalize a bind mount string by parsing and reconstructing it.
+        Handles SELinux flags (:z, :Z) that may not be reported back by Podman.
+        """
+        if not bind_str:
+            return ""
+
+        parts = bind_str.split(":")
+        if len(parts) >= 2:
+            source = parts[0]
+            dest = parts[1]
+
+            # Parse options from the third part if it exists
+            options = []
+            selinux = None
+
+            if len(parts) > 2:
+                opts_str = parts[2]
+                # Check for SELinux flags at the beginning
+                if opts_str.startswith("z,") or opts_str == "z":
+                    selinux = "z"
+                    opts_str = opts_str[2:] if opts_str.startswith("z,") else ""
+                elif opts_str.startswith("Z,") or opts_str == "Z":
+                    selinux = "Z"
+                    opts_str = opts_str[2:] if opts_str.startswith("Z,") else ""
+
+                # Split remaining options
+                if opts_str:
+                    options = opts_str.split(",")
+                    # Remove SELinux flags that might be elsewhere in options
+                    options = [o for o in options if o not in ("z", "Z")]
+
+            # Rebuild normalized string without SELinux flag for comparison
+            # We're ignoring SELinux flags because Podman doesn't reliably report them back
+            result = f"{source}:{dest}"
+            if options:
+                result += ":" + ",".join(sorted(options))
+
+            return result
+
+        return bind_str
 
     # Compare Config and HostConfig sections
     for conf_dict in ("Config", "HostConfig"):
@@ -1003,6 +1046,22 @@ def compare_containers(first, second, ignore=None):
                     val2_normalized = val2.split("/")[-1].split(":")[0]
                     if val1_normalized == val2_normalized:
                         continue
+
+            # ===== PODMAN COMPATIBILITY FIX - Special handling for Binds =====
+            elif item == "Binds":
+                if val1 is None:
+                    val1 = []
+                if val2 is None:
+                    val2 = []
+
+                # Normalize both sets of binds for comparison
+                binds1_normalized = sorted([normalize_bind(b) for b in val1])
+                binds2_normalized = sorted([normalize_bind(b) for b in val2])
+
+                if binds1_normalized == binds2_normalized:
+                    continue
+                # If they don't match after normalization, fall through to show difference
+            # ===== END BINDS FIX =====
 
             # Special handling for Links
             elif item == "Links":
