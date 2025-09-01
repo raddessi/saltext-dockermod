@@ -957,8 +957,8 @@ def compare_containers(first, second, ignore=None):
     """
     Compare two containers' configurations and return a dictionary of differences
 
-    :param first: First container configuration
-    :param second: Second container configuration  
+    :param first: First container configuration (current/existing)
+    :param second: Second container configuration (desired/new)
     :param ignore: List of keys to ignore in comparison
     :return: Dictionary of differences
     """
@@ -1082,22 +1082,25 @@ def compare_containers(first, second, ignore=None):
 
             # ===== PODMAN COMPATIBILITY FIX - Special handling for Annotations =====
             elif item == "Annotations":
-                # If no annotations specified in desired config (val1), skip comparison entirely
-                if val1 is None:
+                # If no annotations specified in desired config (val2 is None), 
+                # treat it as "don't manage annotations" and skip comparison
+                if val2 is None:
                     continue
 
-                # If annotations are specified, only compare the keys that exist in val1
-                # This allows Podman to have its default annotations without triggering updates
-                if isinstance(val1, dict) and isinstance(val2, dict):
+                # If empty dict is explicitly specified, user wants to clear annotations
+                # so fall through to normal comparison
+
+                # If both are dicts, only compare keys that exist in desired (val2)
+                if isinstance(val1, dict) and isinstance(val2, dict) and val2:
                     annotations_match = True
-                    for key, value in val1.items():
-                        if val2.get(key) != value:
+                    for key, value in val2.items():
+                        if val1.get(key) != value:
                             annotations_match = False
                             break
                     if annotations_match:
-                        # The specified annotations match, ignore any extra ones
+                        # The specified annotations match, ignore any extra ones in val1
                         continue
-                # If annotations don't match or aren't dicts, fall through to normal comparison
+                # Fall through for actual differences or empty dict case
             # ===== END PODMAN COMPATIBILITY FIX =====
 
             # Generic comparison for all other items
@@ -1122,9 +1125,9 @@ def compare_containers(first, second, ignore=None):
 
             # ===== PODMAN COMPATIBILITY FIX - Special handling for Annotations =====
             if item == "Annotations":
-                # If annotations weren't in the first container config, skip them
-                # This prevents Podman's default annotations from being seen as "new"
-                if val1 is None:
+                # If the desired state explicitly sets empty annotations, 
+                # we should honor that, otherwise skip
+                if val2 is None:
                     continue
             # ===== END PODMAN COMPATIBILITY FIX =====
 
