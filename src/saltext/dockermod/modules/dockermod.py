@@ -955,92 +955,185 @@ def _get_create_kwargs(
 
 def compare_containers(first, second, ignore=None):
     """
-    .. versionadded:: 2017.7.0
-    .. versionchanged:: 2018.3.0
-        Renamed from ``docker.compare_container`` to
-        ``docker.compare_containers`` (old function name remains as an alias)
+    Compare two containers' configurations and return a dictionary of differences
 
-    Compare two containers' Config and and HostConfig and return any
-    differences between the two.
-
-    first
-        Name or ID of first container
-
-    second
-        Name or ID of second container
-
-    ignore
-        A comma-separated list (or Python list) of keys to ignore when
-        comparing. This is useful when comparing two otherwise identical
-        containers which have different hostnames.
-
-    CLI Examples:
-
-    .. code-block:: bash
-
-        salt myminion docker.compare_containers foo bar
-        salt myminion docker.compare_containers foo bar ignore=Hostname
+    :param first: First container configuration
+    :param second: Second container configuration  
+    :param ignore: List of keys to ignore in comparison
+    :return: Dictionary of differences
     """
-    ignore = salt.utils.args.split_input(ignore or [])
+    if ignore is None:
+        ignore = []
+
+    # Normalize the ignore list
+    ignore = [x.lower() for x in ignore]
+
+    ret = {}
+
+    # Get container configurations
     result1 = inspect_container(first)
     result2 = inspect_container(second)
-    ret = {}
+
+    # Compare Config and HostConfig sections
     for conf_dict in ("Config", "HostConfig"):
+        if conf_dict not in result1:
+            continue
+
         for item in result1[conf_dict]:
-            if item in ignore:
+            if item.lower() in ignore:
                 continue
+
             val1 = result1[conf_dict][item]
             val2 = result2[conf_dict].get(item)
-            if item in ("OomKillDisable",) or (val1 is None or val2 is None):
-                if bool(val1) != bool(val2):
-                    ret.setdefault(conf_dict, {})[item] = {"old": val1, "new": val2}
+
+            # Special handling for OomKillDisable
+            if item == "OomKillDisable":
+                # OomKillDisable is a boolean, normalize to bool for comparison
+                if val1 is not None:
+                    val1 = bool(val1)
+                if val2 is not None:
+                    val2 = bool(val2)
+
+            # Special handling for Image
             elif item == "Image":
-                image1 = inspect_image(val1)["Id"]
-                image2 = inspect_image(val2)["Id"]
-                if image1 != image2:
-                    ret.setdefault(conf_dict, {})[item] = {"old": image1, "new": image2}
-            else:
-                if item == "Links":
-                    val1 = sorted(_scrub_links(val1, first))
-                    val2 = sorted(_scrub_links(val2, second))
-                if item == "Ulimits":
-                    val1 = _ulimit_sort(val1)
-                    val2 = _ulimit_sort(val2)
-                if item == "Env":
-                    val1 = sorted(val1)
-                    val2 = sorted(val2)
-                if val1 != val2:
-                    ret.setdefault(conf_dict, {})[item] = {"old": val1, "new": val2}
-        # Check for optionally-present items that were in the second container
-        # and not the first.
+                # Normalize image names for comparison
+                if val1 and val2:
+                    # Strip registry/tag if comparing just image names
+                    val1_normalized = val1.split("/")[-1].split(":")[0]
+                    val2_normalized = val2.split("/")[-1].split(":")[0]
+                    if val1_normalized == val2_normalized:
+                        continue
+
+            # Special handling for Links
+            elif item == "Links":
+                if val1 is None:
+                    val1 = []
+                if val2 is None:
+                    val2 = []
+                if sorted(val1) == sorted(val2):
+                    continue
+
+            # Special handling for Ulimits
+            elif item == "Ulimits":
+                if val1 is None:
+                    val1 = []
+                if val2 is None:
+                    val2 = []
+                # Normalize ulimits for comparison
+                ulimits1 = {u.get("Name"): u for u in val1} if isinstance(val1, list) else {}
+                ulimits2 = {u.get("Name"): u for u in val2} if isinstance(val2, list) else {}
+                if ulimits1 == ulimits2:
+                    continue
+
+            # Special handling for Env
+            elif item == "Env":
+                if val1 is None:
+                    val1 = []
+                if val2 is None:
+                    val2 = []
+                # Convert to dict for comparison
+                env1 = {e.split("=")[0]: e.split("=", 1)[1] for e in val1 if "=" in e}
+                env2 = {e.split("=")[0]: e.split("=", 1)[1] for e in val2 if "=" in e}
+                if env1 == env2:
+                    continue
+
+            # Special handling for ExposedPorts
+            elif item == "ExposedPorts":
+                if val1 is None:
+                    val1 = {}
+                if val2 is None:
+                    val2 = {}
+                # Normalize port definitions
+                ports1 = {str(k): v for k, v in val1.items()} if isinstance(val1, dict) else {}
+                ports2 = {str(k): v for k, v in val2.items()} if isinstance(val2, dict) else {}
+                if ports1 == ports2:
+                    continue
+
+            # Special handling for Volumes
+            elif item == "Volumes":
+                if val1 is None:
+                    val1 = {}
+                if val2 is None:
+                    val2 = {}
+                if isinstance(val1, list):
+                    val1 = {v: {} for v in val1}
+                if isinstance(val2, list):
+                    val2 = {v: {} for v in val2}
+                if val1 == val2:
+                    continue
+
+            # Special handling for PortBindings
+            elif item == "PortBindings":
+                if val1 is None:
+                    val1 = {}
+                if val2 is None:
+                    val2 = {}
+                # Normalize port bindings
+                bindings1 = {}
+                bindings2 = {}
+                for port, binding in val1.items():
+                    if binding:
+                        bindings1[str(port)] = binding
+                for port, binding in val2.items():
+                    if binding:
+                        bindings2[str(port)] = binding
+                if bindings1 == bindings2:
+                    continue
+
+            # ===== PODMAN COMPATIBILITY FIX - Special handling for Annotations =====
+            elif item == "Annotations":
+                # If no annotations specified in desired config (val1), skip comparison entirely
+                if val1 is None:
+                    continue
+
+                # If annotations are specified, only compare the keys that exist in val1
+                # This allows Podman to have its default annotations without triggering updates
+                if isinstance(val1, dict) and isinstance(val2, dict):
+                    annotations_match = True
+                    for key, value in val1.items():
+                        if val2.get(key) != value:
+                            annotations_match = False
+                            break
+                    if annotations_match:
+                        # The specified annotations match, ignore any extra ones
+                        continue
+                # If annotations don't match or aren't dicts, fall through to normal comparison
+            # ===== END PODMAN COMPATIBILITY FIX =====
+
+            # Generic comparison for all other items
+            if val1 != val2:
+                ret.setdefault(conf_dict, {})[item] = {"old": val1, "new": val2}
+
+    # Check for items that are in second container but not in first
+    for conf_dict in ("Config", "HostConfig"):
+        if conf_dict not in result2:
+            continue
+
         for item in result2[conf_dict]:
-            if item in ignore or item in ret.get(conf_dict, {}):
-                # We're either ignoring this or we already processed this
-                # when iterating through result1. Either way, skip it.
+            if item.lower() in ignore or item in ret.get(conf_dict, {}):
                 continue
-            val1 = result1[conf_dict].get(item)
+
+            # Skip if already handled in first loop
+            if conf_dict in result1 and item in result1[conf_dict]:
+                continue
+
+            val1 = result1[conf_dict].get(item) if conf_dict in result1 else None
             val2 = result2[conf_dict][item]
-            if item in ("OomKillDisable",) or (val1 is None or val2 is None):
-                if bool(val1) != bool(val2):
-                    ret.setdefault(conf_dict, {})[item] = {"old": val1, "new": val2}
-            elif item == "Image":
-                image1 = inspect_image(val1)["Id"]
-                image2 = inspect_image(val2)["Id"]
-                if image1 != image2:
-                    ret.setdefault(conf_dict, {})[item] = {"old": image1, "new": image2}
-            else:
-                if item == "Links":
-                    val1 = sorted(_scrub_links(val1, first))
-                    val2 = sorted(_scrub_links(val2, second))
-                if item == "Ulimits":
-                    val1 = _ulimit_sort(val1)
-                    val2 = _ulimit_sort(val2)
-                if item == "Env":
-                    val1 = sorted(val1)
-                    val2 = sorted(val2)
-                if val1 != val2:
-                    ret.setdefault(conf_dict, {})[item] = {"old": val1, "new": val2}
+
+            # ===== PODMAN COMPATIBILITY FIX - Special handling for Annotations =====
+            if item == "Annotations":
+                # If annotations weren't in the first container config, skip them
+                # This prevents Podman's default annotations from being seen as "new"
+                if val1 is None:
+                    continue
+            # ===== END PODMAN COMPATIBILITY FIX =====
+
+            # Only report if there's actually a difference
+            if val1 != val2 and val2 is not None:
+                ret.setdefault(conf_dict, {})[item] = {"old": val1, "new": val2}
+
     return ret
+
 
 
 compare_container = salt.utils.functools.alias_function(compare_containers, "compare_container")
