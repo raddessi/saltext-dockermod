@@ -952,6 +952,7 @@ def _get_create_kwargs(
     # The "kwargs" dict at this point will only contain unused args
     return create_kwargs, kwargs
 
+
 def compare_containers(first, second, ignore=None):
     """
     Compare two containers' configurations and return a dictionary of differences
@@ -972,50 +973,6 @@ def compare_containers(first, second, ignore=None):
     # Get container configurations
     result1 = inspect_container(first)
     result2 = inspect_container(second)
-
-    # Helper function to normalize bind mount strings for comparison
-    def normalize_bind(bind_str):
-        """
-        Normalize a bind mount string by parsing and reconstructing it.
-        Handles SELinux flags (:z, :Z) that may not be reported back by Podman.
-        """
-        if not bind_str:
-            return ""
-
-        parts = bind_str.split(":")
-        if len(parts) >= 2:
-            source = parts[0]
-            dest = parts[1]
-
-            # Parse options from the third part if it exists
-            options = []
-            selinux = None
-
-            if len(parts) > 2:
-                opts_str = parts[2]
-                # Check for SELinux flags at the beginning
-                if opts_str.startswith("z,") or opts_str == "z":
-                    selinux = "z"
-                    opts_str = opts_str[2:] if opts_str.startswith("z,") else ""
-                elif opts_str.startswith("Z,") or opts_str == "Z":
-                    selinux = "Z"
-                    opts_str = opts_str[2:] if opts_str.startswith("Z,") else ""
-
-                # Split remaining options
-                if opts_str:
-                    options = opts_str.split(",")
-                    # Remove SELinux flags that might be elsewhere in options
-                    options = [o for o in options if o not in ("z", "Z")]
-
-            # Rebuild normalized string without SELinux flag for comparison
-            # We're ignoring SELinux flags because Podman doesn't reliably report them back
-            result = f"{source}:{dest}"
-            if options:
-                result += ":" + ",".join(sorted(options))
-
-            return result
-
-        return bind_str
 
     # Compare Config and HostConfig sections
     for conf_dict in ("Config", "HostConfig"):
@@ -1054,13 +1011,41 @@ def compare_containers(first, second, ignore=None):
                 if val2 is None:
                     val2 = []
 
-                # Normalize both sets of binds for comparison
-                binds1_normalized = sorted([normalize_bind(b) for b in val1])
-                binds2_normalized = sorted([normalize_bind(b) for b in val2])
+                # Check if we're dealing with Podman
+                is_podman = False
+                if "Config" in result1 and "Labels" in result1["Config"]:
+                    labels = result1["Config"]["Labels"] or {}
+                    if "io.container.manager" in labels and labels["io.container.manager"] == "libpod":
+                        is_podman = True
+                if not is_podman and "HostConfig" in result1 and "Annotations" in result1["HostConfig"]:
+                    annotations = result1["HostConfig"]["Annotations"] or {}
+                    if "io.container.manager" in annotations and annotations["io.container.manager"] == "libpod":
+                        is_podman = True
 
-                if binds1_normalized == binds2_normalized:
-                    continue
-                # If they don't match after normalization, fall through to show difference
+                if is_podman:
+                    # For Podman, strip SELinux flags for comparison since they're not reliably reported
+                    def strip_selinux(bind_str):
+                        if not bind_str:
+                            return ""
+                        parts = bind_str.split(":")
+                        if len(parts) > 2:
+                            opts = parts[2].split(",")
+                            opts = [o for o in opts if o not in ("z", "Z")]
+                            if opts:
+                                return f"{parts[0]}:{parts[1]}:{','.join(sorted(opts))}"
+                            else:
+                                return f"{parts[0]}:{parts[1]}"
+                        return bind_str
+
+                    binds1_normalized = sorted([strip_selinux(b) for b in val1])
+                    binds2_normalized = sorted([strip_selinux(b) for b in val2])
+
+                    if binds1_normalized == binds2_normalized:
+                        continue
+                else:
+                    # For Docker, do normal comparison
+                    if sorted(val1) == sorted(val2):
+                        continue
             # ===== END BINDS FIX =====
 
             # Special handling for Links
@@ -1072,17 +1057,41 @@ def compare_containers(first, second, ignore=None):
                 if sorted(val1) == sorted(val2):
                     continue
 
-            # Special handling for Ulimits
+            # ===== PODMAN COMPATIBILITY FIX - Special handling for Ulimits =====
             elif item == "Ulimits":
+                # Check if ulimits are actually specified in desired state
+                if not val2:
+                    # No ulimits specified in desired state, skip comparison entirely
+                    continue
+
+                # Ulimits are specified - only compare the ones in desired state
                 if val1 is None:
                     val1 = []
-                if val2 is None:
-                    val2 = []
-                # Normalize ulimits for comparison
+
+                # Convert to dictionaries for easier comparison
                 ulimits1 = {u.get("Name"): u for u in val1} if isinstance(val1, list) else {}
                 ulimits2 = {u.get("Name"): u for u in val2} if isinstance(val2, list) else {}
-                if ulimits1 == ulimits2:
+
+                # Only compare ulimits that are specified in desired state
+                ulimits_match = True
+                for name, desired_ulimit in ulimits2.items():
+                    current_ulimit = ulimits1.get(name)
+                    if current_ulimit != desired_ulimit:
+                        ulimits_match = False
+                        break
+
+                if ulimits_match:
+                    # All specified ulimits match, ignore any extra ones
                     continue
+
+                # There are differences - only show the managed ulimits in the diff
+                # Filter val1 to only include managed ulimits
+                managed_names = set(ulimits2.keys())
+                val1 = [u for u in val1 if u.get("Name") in managed_names]
+
+                # val2 already only contains managed ulimits
+                # Now fall through to the generic comparison with filtered values
+            # ===== END ULIMITS FIX =====
 
             # Special handling for Env
             elif item == "Env":
@@ -1190,12 +1199,18 @@ def compare_containers(first, second, ignore=None):
                     continue
             # ===== END PODMAN COMPATIBILITY FIX =====
 
+            # ===== PODMAN COMPATIBILITY FIX - Special handling for Ulimits =====  
+            if item == "Ulimits":
+                # Skip if ulimits aren't actually specified
+                if not val2:
+                    continue
+            # ===== END ULIMITS FIX =====
+
             # Only report if there's actually a difference
             if val1 != val2 and val2 is not None:
                 ret.setdefault(conf_dict, {})[item] = {"old": val1, "new": val2}
 
     return ret
-
 
 
 compare_container = salt.utils.functools.alias_function(compare_containers, "compare_container")
