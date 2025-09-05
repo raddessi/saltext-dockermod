@@ -986,6 +986,30 @@ def compare_containers(first, second, ignore=None):
             val1 = result1[conf_dict][item]
             val2 = result2[conf_dict].get(item)
 
+            # ===== PODMAN COMPATIBILITY FIX - Special handling for Hostname =====
+            if item == "Hostname":
+                # Check if hostname looks auto-generated (12 char hex string)
+                def looks_like_auto_hostname(hostname):
+                    """Check if hostname looks like an auto-generated container ID"""
+                    if not hostname or hostname == "":
+                        return False
+                    # Auto-generated hostnames are typically 12 character hex strings
+                    if len(hostname) == 12:
+                        try:
+                            int(hostname, 16)
+                            return True
+                        except ValueError:
+                            pass
+                    return False
+
+                # Skip comparison if:
+                # 1. No hostname specified (val2 is None/empty), OR
+                # 2. BOTH hostnames look auto-generated (Podman behavior)
+                if not val2 or (looks_like_auto_hostname(val1) and looks_like_auto_hostname(val2)):
+                    # Both are auto-generated, skip comparison
+                    continue
+            # ===== END HOSTNAME FIX =====
+
             # Special handling for OomKillDisable
             if item == "OomKillDisable":
                 # OomKillDisable is a boolean, normalize to bool for comparison
@@ -1190,6 +1214,30 @@ def compare_containers(first, second, ignore=None):
 
             val1 = result1[conf_dict].get(item) if conf_dict in result1 else None
             val2 = result2[conf_dict][item]
+
+            # ===== PODMAN COMPATIBILITY FIX - Special handling for Hostname =====
+            if item == "Hostname":
+                # Check if hostname looks auto-generated (12 char hex string)
+                def looks_like_auto_hostname(hostname):
+                    """Check if hostname looks like an auto-generated container ID"""
+                    if not hostname or hostname == "":
+                        return False
+                    # Auto-generated hostnames are typically 12 character hex strings
+                    if len(hostname) == 12:
+                        try:
+                            int(hostname, 16)
+                            return True
+                        except ValueError:
+                            pass
+                    return False
+
+                # Skip comparison if:
+                # 1. No hostname specified (val2 is None/empty), OR
+                # 2. BOTH hostnames look auto-generated (Podman behavior)
+                if not val2 or (looks_like_auto_hostname(val1) and looks_like_auto_hostname(val2)):
+                    # Both are auto-generated, skip comparison
+                    continue
+            # ===== END HOSTNAME FIX =====
 
             # ===== PODMAN COMPATIBILITY FIX - Special handling for Annotations =====
             if item == "Annotations":
