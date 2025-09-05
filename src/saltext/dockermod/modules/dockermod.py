@@ -338,9 +338,6 @@ def __virtual__():
     return (False, "Could not import docker module, is docker-py installed?")
 
 
-def zzz():
-    return "custom"
-
 def _file_client():
     """
     Return a file client
